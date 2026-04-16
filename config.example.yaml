@@ -1,0 +1,30 @@
+root: "YOUR_ADMIN_QQ"
+bt_uin: "YOUR_BOT_QQ"
+enable_webui_interaction: false
+debug: false
+github_proxy: null
+check_ncatbot_update: false
+skip_ncatbot_install_check: true
+websocket_timeout: 90
+
+napcat:
+  ws_uri: ws://127.0.0.1:3001
+  ws_token: CHANGE_ME
+  ws_listen_ip: localhost
+  webui_uri: http://127.0.0.1:6099
+  webui_token: CHANGE_ME
+  enable_webui: false
+  check_napcat_update: false
+  stop_napcat: false
+  remote_mode: true
+  report_self_message: false
+  report_forward_message_detail: true
+
+plugin:
+  plugins_dir: plugins
+  plugin_whitelist:
+  - acm
+  plugin_blacklist: []
+  skip_plugin_load: false
+  admins:
+  - "YOUR_ADMIN_QQ"
