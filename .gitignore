@@ -23,3 +23,5 @@ napcat/
 
 .env
 .env.*
+
+LOCAL_RUNBOOK.md

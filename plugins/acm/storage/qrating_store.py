@@ -261,6 +261,20 @@ class QratingStore:
                 "users": [dict(row) for row in rows],
             }
 
+    def find_active_users_by_nickname(self, nickname: str) -> list[dict]:
+        """Return active qrating users whose nickname exactly matches."""
+        with self._connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, qq_id, nickname, qrating, created_at, updated_at, is_active
+                FROM qrating_users
+                WHERE nickname = ? AND is_active = 1
+                ORDER BY id ASC
+                """,
+                (str(nickname).strip(),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
     def resolve_rank_entries(
         self, entries: Iterable[QratingRankEntryInput]
     ) -> list[dict]:

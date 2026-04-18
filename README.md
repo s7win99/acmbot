@@ -84,6 +84,7 @@ C:\software\Miniconda\envs\acmbot\python.exe main.py
 /contest
 /qrating
 /qrating rank
+/qrating import 比赛名称
 /admin log
 ```
 
@@ -97,6 +98,7 @@ C:\software\Miniconda\envs\acmbot\python.exe main.py
 /contest       查询近期 Codeforces 比赛
 /qrating       查询自己的 qrating
 /qrating rank  查看 qrating 排行榜
+/qrating import 比赛名称  从 VJudge xlsx 榜单生成 update 预览命令，仅管理员可用
 /admin log     查看最近 10 条管理员操作日志，仅管理员可用
 ```
 
@@ -132,10 +134,12 @@ qrating 数据保存在 `data/acm_bot.db`。如果 `data/` 目录或数据库文
 ### 管理员命令
 
 ```text
-/qrating add QQ号 昵称
+/qrating add
+QQ号 昵称
+QQ号 昵称
 ```
 
-添加 qrating 用户，初始 qrating 为 1200。
+添加 qrating 用户，初始 qrating 为 1200。每一行填写一个 QQ 号和昵称，昵称可以包含空格。单行 `/qrating add QQ号 昵称` 不再支持。
 
 ```text
 /qrating update 比赛名称
@@ -154,6 +158,12 @@ qrating 数据保存在 `data/acm_bot.db`。如果 `data/` 目录或数据库文
 手动调整 qrating，用于特殊修正。手动修改请使用 `/qrating adjust`，不要再使用 `/qrating update` 输入 `+25` 或 `-10`。
 
 ```text
+/qrating import 比赛名称
+```
+
+从 VJudge 导出的 xlsx 榜单生成 `/qrating update` 预览命令。第一版不会直接更新 qrating，管理员确认后需要手动发送生成的 update 命令。
+
+```text
 /qrating rank diff
 ```
 
@@ -166,6 +176,30 @@ qrating 数据保存在 `data/acm_bot.db`。如果 `data/` 目录或数据库文
 回滚最近一次 qrating 修改，可以回滚按排名自动计算的 update，也可以回滚手动 adjust。
 
 管理员 QQ 号在 `config.yaml` 的 admins 配置中维护；当前项目使用 `plugin.admins`，代码也兼容顶层 `admins`。该权限不依赖 QQ 群管理员身份。
+
+## VJudge 榜单导入（预览模式）
+
+管理员先发送一个 VJudge 导出的 `.xlsx` 文件，然后回复该文件消息发送：
+
+```text
+/qrating import 比赛名称
+```
+
+例如：
+
+```text
+/qrating import 周赛第5场
+```
+
+机器人会解析 xlsx 中的 Rank 和 Team，并返回一段合法的 `/qrating update` 完整命令文本。
+
+注意：
+
+1. 第一版不会直接更新 qrating。
+2. 第一版只返回 update 命令，管理员确认后再手动发送执行。
+3. Team 的昵称提取规则优先取括号中的姓名，例如：`test(测试) -> 测试`。
+4. 候选昵称必须能唯一精确匹配到 qrating 用户，否则导入失败。
+5. 第一版只读取第一个 sheet，只识别 Rank 和 Team 列。
 
 ## 管理员日志
 
@@ -187,4 +221,4 @@ qrating 数据保存在 `data/acm_bot.db`。如果 `data/` 目录或数据库文
 
 ## 当前阶段说明
 
-当前版本仍然以文字版查询为主，不包含图片卡片、用户绑定、定时提醒、自动 qrating 算法或 Excel 导入。后续再扩展 OJ 查询、比赛提醒、账号绑定、训练统计等功能。
+当前版本仍然以文字版查询为主，不包含图片卡片、用户绑定、定时提醒或自动导入执行。后续再扩展 OJ 查询、比赛提醒、账号绑定、训练统计等功能。
