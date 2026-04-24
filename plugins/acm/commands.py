@@ -2,19 +2,21 @@
 
 import logging
 import sqlite3
-import time
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 
 from .platforms.codeforces import (
     CodeforcesApiError,
-    CodeforcesDataError,
     CodeforcesRequestError,
     UserNotFoundError,
     fetch_user_info,
-    get_upcoming_contests,
 )
+from .services.contest_service import (
+    ContestServiceError,
+    format_contest_list,
+    get_recent_contests,
+)
+from .storage.contest_reminder_store import ContestReminderStore
 from .storage.qrating_store import (
     QratingAmbiguousNicknameError,
     QratingDuplicateUpdateError,
@@ -42,6 +44,7 @@ from .utils.vjudge_import import (
 logger = logging.getLogger(__name__)
 qrating_store = QratingStore()
 admin_log_store = AdminLogStore()
+contest_reminder_store = ContestReminderStore()
 ADMIN_LOG_LIMIT = 10
 ADMIN_LOG_DETAIL_MAX_LENGTH = 120
 
@@ -64,6 +67,15 @@ class QratingAddInput:
     line_no: int
 
 
+@dataclass(frozen=True)
+class CommandContext:
+    """Context for one incoming command."""
+
+    user_id: str | None
+    is_group: bool
+    group_id: str | None = None
+
+
 USER_HELP_TEXT = """ACM Bot 帮助菜单
 
 基础命令：
@@ -71,7 +83,7 @@ USER_HELP_TEXT = """ACM Bot 帮助菜单
 /help        查看帮助菜单
 /about       查看机器人项目信息
 /cf 用户名    查询 Codeforces 用户基础信息
-/contest     查询近期 Codeforces 比赛
+/contest     查询近期比赛
 /qrating     查询队内自己的 qrating
 /qrating rank 查看 qrating 排行榜
 """
@@ -86,25 +98,29 @@ ADMIN_HELP_TEXT = (
     + """
 
 管理员命令：
+/qrating add QQ号 昵称
 /qrating add
 QQ号 昵称
 QQ号 昵称
 /qrating update 比赛名称
-名次 昵称
-名次 昵称
+名次 昵称或QQ号
+名次 昵称或QQ号
 /qrating import 比赛名称
 /qrating adjust 比赛名称
 昵称 +25
 昵称 -10
 /qrating rank diff
 /qrating rollback
+/contest remind on
+/contest remind off
+/contest remind status
 /admin log"""
 )
 
 ABOUT_TEXT = """ACM Bot
 一个面向 ACM/ICPC 训练群的 QQ 机器人。
 当前版本：v0.3.0
-当前阶段：基础命令、Codeforces 用户信息查询与近期比赛查询。"""
+当前阶段：基础命令、Codeforces 用户信息查询、比赛查询与 qrating。"""
 
 CF_USAGE_TEXT = """用法：/cf 用户名
 示例：/cf tourist"""
@@ -116,12 +132,13 @@ QRATING_HELP_TEXT = """qrating 命令帮助：
 /qrating rank         查看 qrating 排行榜
 
 管理员：
+/qrating add QQ号 昵称
 /qrating add
 QQ号 昵称
 QQ号 昵称
 /qrating update 比赛名称
-名次 昵称
-名次 昵称
+名次 昵称或QQ号
+名次 昵称或QQ号
 /qrating import 比赛名称
 /qrating adjust 比赛名称
 昵称+25
@@ -152,6 +169,9 @@ QRATING_OLD_UPDATE_FORMAT_TEXT = """/qrating update 现在用于按比赛排名�
 昵称 -10"""
 
 QRATING_ADD_USAGE_TEXT = """用法：
+/qrating add QQ号 昵称
+
+或批量添加：
 /qrating add
 QQ号 昵称
 QQ号 昵称"""
@@ -160,6 +180,14 @@ QRATING_IMPORT_USAGE_TEXT = """用法：
 /qrating import 比赛名称
 
 请先发送 xlsx 文件，并回复该文件消息执行导入。"""
+
+CONTEST_HELP_TEXT = """用法：
+/contest
+
+管理员可在群聊中配置提醒：
+/contest remind on
+/contest remind off
+/contest remind status"""
 
 
 def handle_ping() -> str:
@@ -217,68 +245,105 @@ async def handle_cf_user(handle: str | None) -> str:
     except CodeforcesRequestError:
         return "Codeforces 查询失败，请稍后重试。"
     except CodeforcesApiError:
-        return "Codeforces 返回异常，请稍后重试。"
+        return "Codeforces 查询失败，请稍后重试。"
 
     return _format_cf_user(user)
 
 
-def format_datetime(timestamp: int) -> str:
-    """Format a Unix timestamp as local time."""
-    return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
-
-
-def format_duration(seconds: int) -> str:
-    """Format seconds as hours and minutes."""
-    total_minutes = max(0, seconds // 60)
-    hours = total_minutes // 60
-    minutes = total_minutes % 60
-    return f"{hours} 小时 {minutes} 分钟"
-
-
-def format_countdown(start_timestamp: int) -> str:
-    """Format the remaining time before a contest starts."""
-    remaining_seconds = start_timestamp - int(time.time())
-    if remaining_seconds <= 0:
-        return "即将开始"
-
-    total_minutes = remaining_seconds // 60
-    days = total_minutes // (24 * 60)
-    hours = (total_minutes % (24 * 60)) // 60
-    minutes = total_minutes % 60
-    return f"{days} 天 {hours} 小时 {minutes} 分钟"
-
-
-def _format_contests(contests: list[dict]) -> str:
-    if not contests:
-        return "暂无即将开始的 Codeforces 比赛。"
-
-    lines = ["近期 Codeforces 比赛："]
-    for index, contest in enumerate(contests, start=1):
-        lines.extend(
-            [
-                "",
-                f"{index}. {contest.get('name') or '未命名比赛'}",
-                f"开始时间：{format_datetime(contest['startTimeSeconds'])}",
-                f"时长：{format_duration(contest['durationSeconds'])}",
-                f"距离开始：{format_countdown(contest['startTimeSeconds'])}",
-            ]
-        )
-    return "\n".join(lines)
+def _require_group_context(context: CommandContext) -> str | None:
+    if not context.is_group or not context.group_id:
+        return "比赛提醒功能仅支持在群聊中配置。"
+    return None
 
 
 async def handle_contest() -> str:
-    """Query and format upcoming Codeforces contests."""
-    print("[ACM Bot] handling /contest")
+    """Query and format merged upcoming contests."""
     try:
-        contests = await get_upcoming_contests(limit=5)
-    except CodeforcesRequestError:
-        return "Codeforces 比赛查询失败，请稍后重试。"
-    except CodeforcesDataError:
-        return "Codeforces 返回数据格式异常，请稍后重试。"
-    except CodeforcesApiError:
-        return "Codeforces 返回异常，请稍后重试。"
+        contests = await get_recent_contests(limit=5)
+    except ContestServiceError:
+        return "比赛查询失败，请稍后重试。"
 
-    return _format_contests(contests)
+    return format_contest_list(contests, title="近期比赛：")
+
+
+def handle_contest_remind_on(context: CommandContext) -> str:
+    """Enable contest reminders for the current group."""
+    group_error = _require_group_context(context)
+    if group_error:
+        return group_error
+
+    permission_error = _require_admin(context.user_id)
+    if permission_error:
+        return permission_error
+
+    contest_reminder_store.enable_group(str(context.group_id))
+    _record_admin_log(
+        context.user_id,
+        "contest_remind_on",
+        f"group_id={context.group_id}; daily=09:00; reminders=60,5; platforms=cf,atc",
+    )
+    return "\n".join(
+        [
+            "已开启本群比赛提醒。",
+            # "每日速览时间：09:00",
+            # "赛前提醒：60 分钟、5 分钟",
+            # "平台：Codeforces, AtCoder",
+        ]
+    )
+
+
+def handle_contest_remind_off(context: CommandContext) -> str:
+    """Disable contest reminders for the current group."""
+    group_error = _require_group_context(context)
+    if group_error:
+        return group_error
+
+    permission_error = _require_admin(context.user_id)
+    if permission_error:
+        return permission_error
+
+    contest_reminder_store.disable_group(str(context.group_id))
+    _record_admin_log(
+        context.user_id,
+        "contest_remind_off",
+        f"group_id={context.group_id}",
+    )
+    return "已关闭本群比赛提醒。"
+
+
+def handle_contest_remind_status(context: CommandContext) -> str:
+    """Show contest reminder status for the current group."""
+    group_error = _require_group_context(context)
+    if group_error:
+        return group_error
+
+    permission_error = _require_admin(context.user_id)
+    if permission_error:
+        return permission_error
+
+    config = contest_reminder_store.get_group(str(context.group_id))
+    _record_admin_log(
+        context.user_id,
+        "contest_remind_status",
+        f"group_id={context.group_id}; enabled={int(bool(config and config.get('enabled')))}",
+    )
+    if not config or not int(config.get("enabled", 0)):
+        return "\n".join(
+            [
+                "比赛提醒状态：",
+                "当前群：未开启",
+            ]
+        )
+
+    return "\n".join(
+        [
+            "比赛提醒状态：",
+            "当前群：已开启",
+            # "每日速览时间：09:00",
+            # "赛前提醒：60 分钟、5 分钟",
+            # "平台：Codeforces, AtCoder",
+        ]
+    )
 
 
 def _format_qrating_delta(delta: int | None) -> str:
@@ -377,10 +442,10 @@ def handle_qrating_profile(user_id: str | None) -> str:
             "你的 qrating：",
             "",
             f"昵称：{profile['nickname']}",
-            f"QQ：{profile['qq_id']}",
-            f"当前 qrating：{profile['qrating']}",
-            f"最近变动：{recent_delta}",
+            f"当前显示 qrating：{profile['display_qrating']}",
+            f"已参加场次：{profile['rated_contest_count']}",
             f"最近比赛：{recent_event}",
+            f"最近变化：{recent_delta}",
         ]
     )
 
@@ -398,7 +463,7 @@ def handle_qrating_rank() -> str:
 
     lines = ["qrating 排行榜：", ""]
     for index, user in enumerate(users, start=1):
-        lines.append(f"{index}. {user['nickname']}  {user['qrating']}")
+        lines.append(f"{index}. {user['nickname']}  {user['display_qrating']}")
     return "\n".join(lines)
 
 
@@ -424,43 +489,36 @@ def handle_qrating_rank_diff(user_id: str | None) -> str:
     _record_admin_log(
         user_id,
         "qrating_rank_diff",
-        f"查看最近一次变化榜：{result['event_name']}",
+        (
+            f"event_name={result['event_name']}; "
+            f"participant_count={result.get('participant_count')}; "
+            f"source={result.get('source')}; "
+            f"algorithm={result.get('algorithm')}; "
+            f"k_factor={result.get('k_factor')}; "
+            f"total_internal_delta="
+            f"{_format_qrating_delta(result.get('total_internal_delta'))}; "
+            f"total_display_delta="
+            f"{_format_qrating_delta(result.get('total_display_delta'))}"
+        ),
     )
 
     lines = [
-        "qrating 排行榜：",
+        "qrating 变化榜：",
+        f"事件：{result['event_name']}",
     ]
-    if result.get("source") == "rank_calc":
-        k_factor = result.get("k_factor") or DEFAULT_PAIRWISE_ELO_K
-        lines.extend(
-            [
-                f"最近比赛：{result['event_name']}",
-                # f"算法：Pairwise Elo，K={k_factor}",
-                "括号内为本次变化",
-                "",
-            ]
-        )
-    elif result.get("source") in {"manual_adjust", "manual"}:
-        lines.extend(
-            [
-                f"最近修改：手动调整 - {result['event_name']}",
-                "括号内为本次变化",
-                "",
-            ]
-        )
-    else:
-        lines.extend(
-            [
-                f"最近修改：{result['event_name']}",
-                "括号内为本次变化",
-                "",
-            ]
-        )
+    algorithm = result.get("algorithm") or "未知"
+    k_factor = result.get("k_factor")
+    algorithm_line = f"算法：{algorithm}"
+    if k_factor is not None:
+        algorithm_line += f"，K={k_factor}"
+    lines.extend([algorithm_line, "括号内为本次显示 qrating 变化", ""])
 
     for index, user in enumerate(users, start=1):
-        delta = user.get("delta")
+        delta = user.get("display_delta")
         delta_text = _format_qrating_delta(delta) if delta is not None else "-"
-        lines.append(f"{index}. {user['nickname']}  {user['qrating']}  ({delta_text})")
+        lines.append(
+            f"{index}. {user['nickname']}  {user['display_qrating']}  ({delta_text})"
+        )
     return "\n".join(lines)
 
 
@@ -472,6 +530,17 @@ def _parse_qrating_add_entries(lines: list[str]) -> list[QratingAddInput] | str:
     first_parts = first_line.split(maxsplit=3)
     body_lines = lines[1:]
     entries: list[QratingAddInput] = []
+
+    if len(first_parts) >= 4:
+        if body_lines:
+            return QRATING_ADD_USAGE_TEXT
+        return [
+            QratingAddInput(
+                qq_id=first_parts[2].strip(),
+                nickname=first_parts[3].strip(),
+                line_no=1,
+            )
+        ]
 
     if len(first_parts) != 2 or not body_lines:
         return QRATING_ADD_USAGE_TEXT
@@ -518,7 +587,9 @@ def _format_qrating_add_reply(
                 "添加成功：",
                 f"用户：{user['nickname']}",
                 f"QQ：{user['qq_id']}",
-                f"初始 qrating：{user['qrating']}",
+                f"内部 qrating：{user['internal_qrating']}",
+                f"显示 qrating：{user['display_qrating']}",
+                f"已参加场次：{user['rated_contest_count']}",
             ]
         )
 
@@ -528,7 +599,8 @@ def _format_qrating_add_reply(
             [
                 "该用户已存在于 qrating 系统中。",
                 f"用户：{user['nickname']}",
-                f"当前 qrating：{user['qrating']}",
+                f"当前显示 qrating：{user['display_qrating']}",
+                f"已参加场次：{user['rated_contest_count']}",
             ]
         )
 
@@ -541,11 +613,18 @@ def _format_qrating_add_reply(
     if created_users:
         lines.extend(["", "新增用户："])
         for user in created_users:
-            lines.append(f"{user['qq_id']} {user['nickname']}  {user['qrating']}")
+            lines.append(
+                f"{user['qq_id']} {user['nickname']}  "
+                f"内部 {user['internal_qrating']} / 显示 {user['display_qrating']} / "
+                f"场次 {user['rated_contest_count']}"
+            )
     if existing_users:
         lines.extend(["", "已存在用户："])
         for user in existing_users:
-            lines.append(f"{user['qq_id']} {user['nickname']}  {user['qrating']}")
+            lines.append(
+                f"{user['qq_id']} {user['nickname']}  "
+                f"显示 {user['display_qrating']} / 场次 {user['rated_contest_count']}"
+            )
     return "\n".join(lines)
 
 
@@ -579,8 +658,10 @@ def handle_qrating_add(lines: list[str], user_id: str | None) -> str:
             user_id,
             "qrating_add",
             (
-                f"添加用户 {len(created_users)} 人，"
-                f"已存在 {len(existing_users)} 人"
+                f"action=qrating_add; participant_count={len(created_users)}; "
+                f"source=admin; algorithm=manual; "
+                f"initial_internal={created_users[0]['internal_qrating']}; "
+                f"initial_display={created_users[0]['display_qrating']}"
             ),
         )
 
@@ -863,31 +944,42 @@ def handle_qrating_update(lines: list[str], user_id: str | None) -> str:
         logger.exception("failed to calculate qrating")
         return "qrating 算法计算失败，请检查输入后重试。"
 
-    total_delta = sum(int(change["delta"]) for change in result["changes"])
+    total_internal_delta = sum(
+        int(change["internal_delta"]) for change in result["changes"]
+    )
+    total_display_delta = sum(
+        int(change["display_delta"]) for change in result["changes"]
+    )
     _record_admin_log(
         user_id,
         "qrating_update",
         (
-            f"{result['event_name']}，参赛人数 {len(result['changes'])}，"
-            f"算法 pairwise_elo，K={DEFAULT_PAIRWISE_ELO_K}，"
-            f"总变化 {_format_qrating_delta(total_delta)}"
+            f"event_name={result['event_name']}; "
+            f"participant_count={result['participant_count']}; "
+            f"source={result['source']}; algorithm={result['algorithm']}; "
+            f"k_factor={result['k_factor']}; "
+            f"total_internal_delta={_format_qrating_delta(total_internal_delta)}; "
+            f"total_display_delta={_format_qrating_delta(total_display_delta)}"
         ),
     )
     reply_lines = [
         f"qrating 更新完成：{result['event_name']}",
-        # f"算法：Pairwise Elo，K={DEFAULT_PAIRWISE_ELO_K}",
+        f"算法：Pairwise Elo，K={DEFAULT_PAIRWISE_ELO_K}",
+        "以下为显示 qrating 变化：",
         "",
     ]
     for change in result["changes"]:
-        delta_text = _format_qrating_delta(change["delta"])
+        delta_text = _format_qrating_delta(change["display_delta"])
         reply_lines.append(
-            f"{change['nickname']}：{change['old_qrating']} -> "
-            f"{change['new_qrating']}（{delta_text}）"
+            f"{change['nickname']}：{change['old_display_qrating']} -> "
+            f"{change['new_display_qrating']}（{delta_text}，"
+            f"场次 {change['old_rated_contest_count']} -> "
+            f"{change['new_rated_contest_count']}）"
         )
     reply_lines.extend(
         [
             "",
-            f"本场 qrating 总变化：{_format_qrating_delta(total_delta)}",
+            f"本场显示 qrating 总变化：{_format_qrating_delta(total_display_delta)}",
             "",
             "如录入有误，可使用 /qrating rollback 回滚本次修改。",
         ]
@@ -928,23 +1020,38 @@ def handle_qrating_adjust(lines: list[str], user_id: str | None) -> str:
         logger.exception("failed to adjust qrating")
         return "qrating 手动调整失败，请稍后重试。"
 
-    total_delta = sum(int(change["delta"]) for change in result["changes"])
+    total_internal_delta = sum(
+        int(change["internal_delta"]) for change in result["changes"]
+    )
+    total_display_delta = sum(
+        int(change["display_delta"]) for change in result["changes"]
+    )
     _record_admin_log(
         user_id,
         "qrating_adjust",
         (
-            f"手动修正，调整人数 {len(result['changes'])}，"
-            f"总变化 {_format_qrating_delta(total_delta)}"
+            f"event_name={result['event_name']}; "
+            f"participant_count={result['participant_count']}; "
+            f"source={result['source']}; algorithm={result['algorithm']}; "
+            f"k_factor={result['k_factor']}; "
+            f"total_internal_delta={_format_qrating_delta(total_internal_delta)}; "
+            f"total_display_delta={_format_qrating_delta(total_display_delta)}"
         ),
     )
-    reply_lines = [f"qrating 手动调整完成：{result['event_name']}", ""]
+    reply_lines = [
+        f"qrating 手动调整完成：{result['event_name']}",
+        "以下为显示 qrating 变化：",
+        "",
+    ]
     for change in result["changes"]:
-        delta_text = _format_qrating_delta(change["delta"])
+        delta_text = _format_qrating_delta(change["display_delta"])
         reply_lines.append(
-            f"{change['nickname']}：{change['old_qrating']} -> "
-            f"{change['new_qrating']}（{delta_text}）"
+            f"{change['nickname']}：{change['old_display_qrating']} -> "
+            f"{change['new_display_qrating']}（{delta_text}）"
         )
-    reply_lines.extend(["", f"本次 qrating 总变化：{_format_qrating_delta(total_delta)}"])
+    reply_lines.extend(
+        ["", f"本次显示 qrating 总变化：{_format_qrating_delta(total_display_delta)}"]
+    )
     return "\n".join(reply_lines)
 
 
@@ -966,8 +1073,9 @@ def handle_qrating_rollback(user_id: str | None) -> str:
         user_id,
         "qrating_rollback",
         (
-            f"回滚事件：{result['event_name']}，类型：{result.get('source')}，"
-            f"影响人数 {len(result['changes'])}"
+            f"event_name={result['event_name']}; source={result.get('source')}; "
+            f"algorithm={result.get('algorithm')}; k_factor={result.get('k_factor')}; "
+            f"participant_count={len(result['changes'])}"
         ),
     )
     reply_lines = [
@@ -977,8 +1085,10 @@ def handle_qrating_rollback(user_id: str | None) -> str:
     ]
     for change in result["changes"]:
         reply_lines.append(
-            f"{change['nickname']}：{change['from_qrating']} -> "
-            f"{change['to_qrating']}"
+            f"{change['nickname']}：显示 {change['from_display_qrating']} -> "
+            f"{change['to_display_qrating']}，场次 "
+            f"{change['from_rated_contest_count']} -> "
+            f"{change['to_rated_contest_count']}"
         )
     return "\n".join(reply_lines)
 
@@ -1013,9 +1123,39 @@ def handle_qrating_command(message: str, user_id: str | None) -> str:
     return QRATING_HELP_TEXT
 
 
-async def dispatch_command(message: str, user_id: str | None = None) -> str | None:
+async def handle_contest_command(message: str, context: CommandContext) -> str:
+    """Dispatch /contest subcommands."""
+    command = message.strip()
+    if command == "/contest":
+        return await handle_contest()
+
+    lines = [line.strip() for line in command.splitlines() if line.strip()]
+    if not lines:
+        return CONTEST_HELP_TEXT
+
+    parts = lines[0].split()
+    if len(parts) == 3 and parts[0] == "/contest" and parts[1].lower() == "remind":
+        action = parts[2].lower()
+        if action == "on":
+            return handle_contest_remind_on(context)
+        if action == "off":
+            return handle_contest_remind_off(context)
+        if action == "status":
+            return handle_contest_remind_status(context)
+
+    return CONTEST_HELP_TEXT
+
+
+async def dispatch_command(
+    message: str,
+    user_id: str | None = None,
+    *,
+    is_group: bool = False,
+    group_id: str | None = None,
+) -> str | None:
     """Dispatch a raw text message to a command handler."""
     command = message.strip()
+    context = CommandContext(user_id=user_id, is_group=is_group, group_id=group_id)
 
     if command == "/ping":
         return handle_ping()
@@ -1028,8 +1168,8 @@ async def dispatch_command(message: str, user_id: str | None = None) -> str | No
     if command.startswith("/cf "):
         handle = command.removeprefix("/cf ").strip()
         return await handle_cf_user(handle)
-    if command == "/contest":
-        return await handle_contest()
+    if command == "/contest" or command.startswith("/contest "):
+        return await handle_contest_command(command, context)
     if command == "/admin log":
         return handle_admin_log(user_id)
     if command == "/qrating" or command.startswith("/qrating "):

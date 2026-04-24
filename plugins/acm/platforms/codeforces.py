@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
+
 import httpx
 
 
 CODEFORCES_USER_INFO_URL = "https://codeforces.com/api/user.info"
 CODEFORCES_CONTEST_LIST_URL = "https://codeforces.com/api/contest.list"
 REQUEST_TIMEOUT_SECONDS = 10.0
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 class CodeforcesError(Exception):
@@ -34,7 +38,10 @@ async def _get_codeforces_payload(url: str, params: dict | None = None) -> dict:
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
             response = await client.get(url, params=params)
+            response.raise_for_status()
             return response.json()
+    except httpx.HTTPStatusError:
+        raise CodeforcesRequestError("Codeforces returned bad HTTP status") from None
     except (httpx.TimeoutException, httpx.RequestError):
         raise CodeforcesRequestError("Codeforces request failed") from None
     except ValueError:
@@ -69,9 +76,12 @@ async def fetch_user_info(handle: str) -> dict:
     return user
 
 
-async def get_upcoming_contests(limit: int = 5) -> list[dict]:
-    """Fetch upcoming Codeforces contests."""
-    print("[Codeforces] fetching upcoming contests")
+def _build_contest_url(contest_id: str) -> str:
+    return f"https://codeforces.com/contest/{contest_id}"
+
+
+async def get_upcoming_contests(limit: int | None = None) -> list[dict]:
+    """Fetch upcoming Codeforces contests as unified contest objects."""
     payload = await _get_codeforces_payload(CODEFORCES_CONTEST_LIST_URL)
 
     if payload.get("status") != "OK":
@@ -88,20 +98,34 @@ async def get_upcoming_contests(limit: int = 5) -> list[dict]:
         if contest.get("phase") != "BEFORE":
             continue
 
-        start_time = contest.get("startTimeSeconds")
-        duration = contest.get("durationSeconds")
-        if not isinstance(start_time, int) or not isinstance(duration, int):
+        contest_id = contest.get("id")
+        title = contest.get("name")
+        start_time_seconds = contest.get("startTimeSeconds")
+        duration_seconds = contest.get("durationSeconds")
+
+        if contest_id is None or not title:
             continue
+        if not isinstance(start_time_seconds, int) or not isinstance(
+            duration_seconds, int
+        ):
+            continue
+
+        start_time = datetime.fromtimestamp(
+            start_time_seconds, tz=timezone.utc
+        ).astimezone(SHANGHAI_TZ)
 
         contests.append(
             {
-                "id": contest.get("id"),
-                "name": contest.get("name") or "未命名比赛",
-                "phase": contest.get("phase"),
-                "durationSeconds": duration,
-                "startTimeSeconds": start_time,
+                "platform": "cf",
+                "contest_id": str(contest_id),
+                "title": str(title),
+                "start_time": start_time,
+                "duration_minutes": max(0, duration_seconds // 60),
+                "url": _build_contest_url(str(contest_id)),
             }
         )
 
-    contests.sort(key=lambda item: item["startTimeSeconds"])
-    return contests[:limit]
+    contests.sort(key=lambda item: item["start_time"])
+    if limit is not None:
+        return contests[:limit]
+    return contests

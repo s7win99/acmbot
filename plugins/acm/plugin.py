@@ -21,12 +21,22 @@ from .commands import (
     is_qrating_import_command,
     precheck_qrating_import_command,
 )
+from .services.contest_service import (
+    ContestServiceError,
+    format_contest_list,
+    format_contest_reminder,
+    get_all_upcoming_contests,
+    get_contests_in_window,
+    get_now,
+)
+from .storage.contest_reminder_store import ContestReminderStore
 
 
 logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TMP_IMPORT_DIR = PROJECT_ROOT / "data" / "tmp_imports"
 TMP_IMPORT_MAX_AGE_SECONDS = 24 * 60 * 60
+contest_reminder_store = ContestReminderStore()
 
 
 class Plugin(NcatBotPlugin):
@@ -43,6 +53,11 @@ class Plugin(NcatBotPlugin):
         self.register_handler(OFFICIAL_GROUP_MESSAGE_EVENT, self.handle_group_message)
         self.register_handler(
             OFFICIAL_PRIVATE_MESSAGE_EVENT, self.handle_private_message
+        )
+        self.add_scheduled_task(
+            self._run_contest_reminder_checks,
+            name="acm_contest_reminder_checks",
+            interval="60s",
         )
         print("[ACM Bot] plugin loaded")
 
@@ -71,7 +86,17 @@ class Plugin(NcatBotPlugin):
                     message, user_id=user_id, attachment=attachment
                 )
         else:
-            reply_text = await dispatch_command(message, user_id=user_id)
+            reply_text = await dispatch_command(
+                message,
+                user_id=user_id,
+                is_group=isinstance(message_event, GroupMessageEvent),
+                group_id=(
+                    str(message_event.group_id)
+                    if isinstance(message_event, GroupMessageEvent)
+                    and getattr(message_event, "group_id", None)
+                    else None
+                ),
+            )
 
         if reply_text is None:
             return
@@ -160,6 +185,130 @@ class Plugin(NcatBotPlugin):
             )
 
         return QratingImportAttachment(status="ok", path=Path(downloaded_path))
+
+    async def _run_contest_reminder_checks(self) -> None:
+        """Run daily overview and pre-contest reminders for enabled groups."""
+        enabled_groups = contest_reminder_store.get_enabled_groups()
+        if not enabled_groups:
+            return
+
+        try:
+            contests = await get_all_upcoming_contests()
+        except ContestServiceError:
+            logger.warning("contest reminder skipped because all contest sources failed")
+            return
+        except Exception:
+            logger.exception("contest reminder task failed to fetch contests")
+            return
+
+        now = get_now()
+        recent_contests = contests[:5]
+
+        for group in enabled_groups:
+            group_id = str(group["group_id"])
+            try:
+                await self._maybe_send_daily_digest(group_id, group, recent_contests, now)
+                await self._maybe_send_window_reminder(
+                    group_id,
+                    contests,
+                    now,
+                    upper_minutes=60,
+                    lower_minutes_exclusive=50,
+                    remind_type="before_60",
+                    title="比赛提醒（1 小时后开始）",
+                )
+                await self._maybe_send_window_reminder(
+                    group_id,
+                    contests,
+                    now,
+                    upper_minutes=5,
+                    lower_minutes_exclusive=0,
+                    remind_type="before_5",
+                    title="比赛提醒（5 分钟后开始）",
+                )
+            except Exception:
+                logger.exception("contest reminder task failed for group %s", group_id)
+
+    async def _maybe_send_daily_digest(
+        self,
+        group_id: str,
+        group_config: dict,
+        recent_contests: list[dict],
+        now,
+    ) -> None:
+        if not recent_contests:
+            return
+
+        daily_hour = int(group_config.get("daily_hour", 9))
+        daily_minute = int(group_config.get("daily_minute", 0))
+        if not (
+            now.hour == daily_hour
+            and daily_minute <= now.minute < daily_minute + 5
+        ):
+            return
+
+        daily_key = f"daily_{now.date().isoformat()}"
+        if contest_reminder_store.has_record(group_id, "all", daily_key, daily_key):
+            return
+
+        message = format_contest_list(recent_contests, title="每日比赛速览：", now=now)
+        if await self._send_group_text(group_id, message):
+            contest_reminder_store.add_record(group_id, "all", daily_key, daily_key)
+
+    async def _maybe_send_window_reminder(
+        self,
+        group_id: str,
+        contests: list[dict],
+        now,
+        *,
+        upper_minutes: int,
+        lower_minutes_exclusive: int,
+        remind_type: str,
+        title: str,
+    ) -> None:
+        window_contests = get_contests_in_window(
+            contests,
+            upper_minutes=upper_minutes,
+            lower_minutes_exclusive=lower_minutes_exclusive,
+            now=now,
+        )
+        if not window_contests:
+            return
+
+        unsent_contests: list[dict] = []
+        pending_records: list[tuple[str, str, str, str]] = []
+        for contest in window_contests:
+            if contest_reminder_store.has_record(
+                group_id,
+                contest["platform"],
+                contest["contest_id"],
+                remind_type,
+            ):
+                continue
+            unsent_contests.append(contest)
+            pending_records.append(
+                (
+                    group_id,
+                    contest["platform"],
+                    contest["contest_id"],
+                    remind_type,
+                )
+            )
+
+        if not unsent_contests:
+            return
+
+        message = format_contest_reminder(title, unsent_contests)
+        if await self._send_group_text(group_id, message):
+            contest_reminder_store.add_records(pending_records)
+
+    async def _send_group_text(self, group_id: str, message: str) -> bool:
+        try:
+            await self.api.send_group_plain_text(group_id, message)
+            return True
+        except Exception:
+            logger.exception("failed to send contest reminder to group %s", group_id)
+            return False
 
     async def _ensure_download_url(
         self,

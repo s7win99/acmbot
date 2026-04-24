@@ -25,3 +25,5 @@ napcat/
 .env.*
 
 LOCAL_RUNBOOK.md
+acmbot_server_deployment_guide.md
+
