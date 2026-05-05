@@ -30,6 +30,7 @@ from .services.contest_service import (
     get_now,
 )
 from .storage.contest_reminder_store import ContestReminderStore
+from .storage.daily_problem_store import DailyProblemStore
 
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TMP_IMPORT_DIR = PROJECT_ROOT / "data" / "tmp_imports"
 TMP_IMPORT_MAX_AGE_SECONDS = 24 * 60 * 60
 contest_reminder_store = ContestReminderStore()
+daily_problem_store = DailyProblemStore()
 
 
 class Plugin(NcatBotPlugin):
@@ -57,6 +59,11 @@ class Plugin(NcatBotPlugin):
         self.add_scheduled_task(
             self._run_contest_reminder_checks,
             name="acm_contest_reminder_checks",
+            interval="60s",
+        )
+        self.add_scheduled_task(
+            self._run_daily_problem_push,
+            name="acm_daily_problem_push",
             interval="60s",
         )
         print("[ACM Bot] plugin loaded")
@@ -309,6 +316,45 @@ class Plugin(NcatBotPlugin):
         except Exception:
             logger.exception("failed to send contest reminder to group %s", group_id)
             return False
+
+    def _format_daily_problem(self, problem: dict) -> str:
+        """Format a daily problem message."""
+        return "\n".join(
+            [
+                "每日一题",
+                "",
+                f"标题：{problem.get('title')}",
+                f"链接：{problem.get('link')}",
+                "",
+                "加油，坚持每日一题！",
+            ]
+        )
+
+    async def _run_daily_problem_push(self) -> None:
+        """Check and publish daily problems that are due."""
+        enabled_groups = daily_problem_store.get_enabled_groups()
+        if not enabled_groups:
+            return
+
+        now = get_now()
+        problems_to_publish = daily_problem_store.get_problems_to_publish(now)
+
+        for problem in problems_to_publish:
+            message = self._format_daily_problem(problem)
+            all_success = True
+            for group in enabled_groups:
+                group_id = str(group["group_id"])
+                if not await self._send_group_text(group_id, message):
+                    all_success = False
+
+            if all_success:
+                daily_problem_store.mark_published(problem["id"])
+                logger.info(
+                    "daily problem published: id=%s title=%s groups=%d",
+                    problem["id"],
+                    problem.get("title"),
+                    len(enabled_groups),
+                )
 
     async def _ensure_download_url(
         self,

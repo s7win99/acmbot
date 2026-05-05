@@ -2,7 +2,7 @@
 
 ACM Bot 是一个基于 NcatBot 的 QQ 机器人项目，目标是服务 ACM/ICPC 训练群。
 
-当前版本实现第三阶段：在基础命令之外，支持 Codeforces 用户基础信息、Codeforces + AtCoder 比赛查询、群比赛提醒和训练队内部 qrating 双分系统。
+当前版本实现第三阶段：在基础命令之外，支持 Codeforces 用户基础信息、Codeforces + AtCoder 比赛查询、群比赛提醒、每日一题和训练队内部 qrating 双分系统。
 
 ## 环境要求
 
@@ -74,36 +74,49 @@ C:\software\Miniconda\envs\acmbot\python.exe main.py
 
 ## 当前支持命令
 
-群聊和私聊均支持：
+### 常用命令
 
 ```text
-/ping
-/help
-/about
-/cf 用户名
-/contest
-/contest remind on
-/contest remind off
-/contest remind status
-/qrating
-/qrating rank
-/qrating import 比赛名称
-/admin log
+/ping - 检查机器人在线状态
+/help - 查看帮助菜单
+/about - 查看机器人项目信息
+/cf <用户名> - 查询 Codeforces 用户信息
+/contest - 查看近期比赛
+/qrating - 查询我的 qrating
+/qrating rank - 查看队内排行榜
+/daily - 查看今日一题
 ```
 
-命令说明：
+### 帮助命令
 
 ```text
-/ping          测试机器人是否在线
-/help          查看帮助菜单
-/about         查看机器人项目信息
-/cf 用户名      查询 Codeforces 用户基础信息
-/contest       查询近期比赛
-/contest remind on/off/status  管理员配置当前群比赛提醒
-/qrating       查询自己的 qrating
-/qrating rank  查看 qrating 排行榜
-/qrating import 比赛名称  从 VJudge xlsx 榜单生成 update 预览命令，仅管理员可用
-/admin log     查看最近 10 条管理员操作日志，仅管理员可用
+/help - 查看主帮助菜单
+/help qrating - qrating 评分系统帮助
+/help contest - 比赛查询与提醒帮助
+/help daily - 每日一题帮助
+/help admin - 管理员命令帮助（仅管理员）
+```
+
+### 管理员命令
+
+```text
+/qrating add <用户> - 添加队员
+/qrating update - 更新比赛 rating
+/qrating import - 导入比赛排名文件
+/qrating adjust <用户> <分数> - 手动调整 rating
+/qrating rollback - 回滚最近一次更新
+/qrating rank diff - 查看最近 rating 变化
+/contest remind on - 开启比赛提醒
+/contest remind off - 关闭比赛提醒
+/contest remind status - 查看提醒状态
+/daily add - 添加题目
+/daily list - 查看题目列表
+/daily edit <编号> - 编辑题目
+/daily delete <编号> - 删除题目
+/daily on - 开启每日一题（仅群聊）
+/daily off - 关闭每日一题（仅群聊）
+/daily status - 查看状态（仅群聊）
+/admin log - 查看最近操作日志
 ```
 
 示例：
@@ -111,6 +124,10 @@ C:\software\Miniconda\envs\acmbot\python.exe main.py
 ```text
 /cf tourist
 /contest
+/daily add
+A + B Problem
+https://example.com/problem/1
+2024-01-15 09:00
 ```
 
 未知命令不会回复，避免机器人刷屏。
@@ -166,6 +183,70 @@ C:\software\Miniconda\envs\acmbot\python.exe main.py
 - 同一群同一比赛同一提醒类型只会提醒一次。
 - 每日速览同一群同一天只会发送一次。
 - 提醒功能仅支持在群聊中配置。
+
+## 每日一题
+
+管理员可以在群聊中开启每日一题功能，机器人会在指定时间自动向所有已开启的群推送题目。
+
+### 群聊配置命令（仅管理员）
+
+```text
+/daily on
+/daily off
+/daily status
+```
+
+作用：
+
+- `/daily on`：开启当前群每日一题推送。
+- `/daily off`：关闭当前群每日一题推送。
+- `/daily status`：查看当前群每日一题状态。
+
+### 题目管理命令（管理员，支持私聊）
+
+```text
+/daily add
+题目标题
+链接
+2024-01-15 09:00
+```
+
+添加一道每日一题，发布时间使用北京时间格式 `YYYY-MM-DD HH:MM`。
+
+```text
+/daily list
+```
+
+查看所有待发布的题目列表。
+
+```text
+/daily edit ID
+新标题（留空不修改）
+新链接（留空不修改）
+新时间（留空不修改）
+```
+
+编辑指定 ID 的题目，留空表示不修改该项。
+
+```text
+/daily delete ID
+```
+
+删除指定 ID 的题目。
+
+### 推送机制
+
+- 机器人每 60 秒检查一次是否有待发布的题目。
+- 到达发布时间后，自动向所有已开启每日一题的群推送同一道题目。
+- 推送成功后标记为已发布，不会重复推送。
+- 推送消息格式：标题 + 链接。
+
+### 注意事项
+
+- 题目是全局的，添加后会推送到所有开启每日一题的群。
+- 群聊配置命令（on/off/status）必须在群聊中使用。
+- 题目管理命令（add/list/edit/delete）支持私聊使用。
+- 所有管理命令需要管理员权限。
 
 ## qrating 系统
 
@@ -310,4 +391,4 @@ QQ号 昵称
 
 ## 当前阶段说明
 
-当前版本仍然以文字版查询为主，不包含图片卡片、用户绑定、定时提醒或自动导入执行。后续再扩展 OJ 查询、比赛提醒、账号绑定、训练统计等功能。
+当前版本支持基础命令、Codeforces 用户查询、比赛查询、比赛提醒、每日一题和 qrating 系统。后续再扩展 OJ 查询、账号绑定、训练统计等功能。

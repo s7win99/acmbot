@@ -3,7 +3,9 @@
 import logging
 import sqlite3
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from .platforms.codeforces import (
     CodeforcesApiError,
@@ -17,6 +19,7 @@ from .services.contest_service import (
     get_recent_contests,
 )
 from .storage.contest_reminder_store import ContestReminderStore
+from .storage.daily_problem_store import DailyProblemStore
 from .storage.qrating_store import (
     QratingAmbiguousNicknameError,
     QratingDuplicateUpdateError,
@@ -45,8 +48,10 @@ logger = logging.getLogger(__name__)
 qrating_store = QratingStore()
 admin_log_store = AdminLogStore()
 contest_reminder_store = ContestReminderStore()
+daily_problem_store = DailyProblemStore()
 ADMIN_LOG_LIMIT = 10
 ADMIN_LOG_DETAIL_MAX_LENGTH = 120
+SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 
 @dataclass(frozen=True)
@@ -78,44 +83,88 @@ class CommandContext:
 
 USER_HELP_TEXT = """ACM Bot 帮助菜单
 
-基础命令：
-/ping        测试机器人是否在线
-/help        查看帮助菜单
-/about       查看机器人项目信息
-/cf 用户名    查询 Codeforces 用户基础信息
-/contest     查询近期比赛
-/qrating     查询队内自己的 qrating
-/qrating rank 查看 qrating 排行榜
-"""
-# 后续规划：
-# /bind cf 用户名  绑定 Codeforces 账号
-# """
-# 说明：
-# 当前版本支持基础命令、Codeforces 用户查询、近期比赛查询和训练队内部 qrating。
+常用命令
+/ping - 检查机器人在线状态
+/cf <用户名> - 查询 Codeforces 用户信息
+/contest - 查看近期比赛
+/qrating - 查询我的 qrating
+/qrating rank - 查看队内排行榜
+/daily - 查看今日一题
 
-ADMIN_HELP_TEXT = (
-    USER_HELP_TEXT
-    + """
+详细帮助
+/help qrating - qrating 评分系统
+/help contest - 比赛查询与提醒
+/help daily - 每日一题
+/help admin - 管理员命令
 
-管理员命令：
-/qrating add QQ号 昵称
-/qrating add
-QQ号 昵称
-QQ号 昵称
-/qrating update 比赛名称
-名次 昵称或QQ号
-名次 昵称或QQ号
-/qrating import 比赛名称
-/qrating adjust 比赛名称
-昵称 +25
-昵称 -10
-/qrating rank diff
-/qrating rollback
-/contest remind on
-/contest remind off
-/contest remind status
-/admin log"""
-)
+项目命令
+/about - 查看机器人项目信息"""
+
+ADMIN_HELP_TEXT = """管理员命令帮助
+
+qrating 管理
+/qrating add <用户> - 添加队员
+/qrating update - 更新比赛 rating
+/qrating import - 导入比赛排名文件
+/qrating adjust <用户> <分数> - 手动调整 rating
+/qrating rollback - 回滚最近一次更新
+/qrating rank diff - 查看最近 rating 变化
+
+比赛提醒
+/contest remind on - 开启提醒
+/contest remind off - 关闭提醒
+/contest remind status - 查看状态
+
+每日一题
+/daily add - 添加题目
+/daily list - 查看题目列表
+/daily edit <编号> - 编辑题目
+/daily delete <编号> - 删除题目
+/daily on - 开启每日一题
+/daily off - 关闭每日一题
+/daily status - 查看状态
+
+日志
+/admin log - 查看最近操作日志"""
+
+HELP_QRATING_TEXT = """qrating 帮助
+
+用户命令
+/qrating - 查询我的 qrating
+/qrating rank - 查看队内排行榜
+
+管理员命令
+/qrating add <用户> - 添加队员
+/qrating update - 根据比赛结果更新 rating
+/qrating import - 导入比赛排名文件
+/qrating adjust <用户> <分数> - 手动调整 rating
+/qrating rollback - 回滚最近一次 rating 更新
+/qrating rank diff - 查看最近一次 rating 变化"""
+
+HELP_CONTEST_TEXT = """比赛帮助
+
+用户命令
+/contest - 查看近期比赛
+
+管理员命令
+/contest remind on - 开启比赛提醒
+/contest remind off - 关闭比赛提醒
+/contest remind status - 查看提醒状态"""
+
+HELP_DAILY_TEXT = """每日一题帮助
+
+用户命令
+/daily - 查看今日一题
+/daily help - 查看每日一题帮助
+
+管理员命令
+/daily add - 添加题目
+/daily list - 查看题目列表
+/daily edit <编号> - 编辑题目
+/daily delete <编号> - 删除题目
+/daily on - 开启每日一题
+/daily off - 关闭每日一题
+/daily status - 查看状态"""
 
 ABOUT_TEXT = """ACM Bot
 一个面向 ACM/ICPC 训练群的 QQ 机器人。
@@ -189,16 +238,74 @@ CONTEST_HELP_TEXT = """用法：
 /contest remind off
 /contest remind status"""
 
+DAILY_HELP_TEXT = """每日一题功能帮助：
+
+普通用户：
+/daily help        查看帮助
+
+管理员：
+/daily on          开启本群每日一题
+/daily off         关闭本群每日一题
+/daily status      查看每日一题状态
+/daily list        查看待发布题目列表
+/daily delete ID   删除指定题目
+
+添加题目：
+/daily add
+题目标题
+链接
+2024-01-15 09:00
+
+编辑题目：
+/daily edit ID
+新标题（留空不修改）
+新链接（留空不修改）
+新时间（留空不修改）"""
+
+DAILY_ADD_USAGE_TEXT = """用法：
+/daily add
+题目标题
+链接
+2024-01-15 09:00
+
+示例：
+/daily add
+A + B Problem
+https://example.com/problem/1
+2024-01-15 09:00"""
+
+DAILY_EDIT_USAGE_TEXT = """用法：
+/daily edit ID
+新标题（留空不修改）
+新链接（留空不修改）
+新时间（留空不修改）
+
+示例：
+/daily edit 1
+新标题
+https://example.com/problem/2
+2024-01-16 10:00"""
+
 
 def handle_ping() -> str:
     """Return the ping response."""
     return "别ping了，我还活着~"
 
 
-def handle_help(user_id: str | None = None) -> str:
-    """Return the help menu."""
-    if is_admin(user_id):
+def handle_help(user_id: str | None = None, topic: str | None = None) -> str:
+    """Return the help menu, optionally for a specific topic."""
+    if topic is None:
+        return USER_HELP_TEXT
+    if topic == "admin":
+        if not is_admin(user_id):
+            return "该帮助仅管理员可查看。"
         return ADMIN_HELP_TEXT
+    if topic == "qrating":
+        return HELP_QRATING_TEXT
+    if topic == "contest":
+        return HELP_CONTEST_TEXT
+    if topic == "daily":
+        return HELP_DAILY_TEXT
     return USER_HELP_TEXT
 
 
@@ -253,6 +360,12 @@ async def handle_cf_user(handle: str | None) -> str:
 def _require_group_context(context: CommandContext) -> str | None:
     if not context.is_group or not context.group_id:
         return "比赛提醒功能仅支持在群聊中配置。"
+    return None
+
+
+def _require_group_context_for_daily(context: CommandContext) -> str | None:
+    if not context.is_group or not context.group_id:
+        return "每日一题功能仅支持在群聊中配置。"
     return None
 
 
@@ -1146,6 +1259,285 @@ async def handle_contest_command(message: str, context: CommandContext) -> str:
     return CONTEST_HELP_TEXT
 
 
+def _parse_publish_time(time_text: str) -> str | None:
+    """Parse time string in format 'YYYY-MM-DD HH:MM' to ISO format."""
+    try:
+        dt = datetime.strptime(time_text.strip(), "%Y-%m-%d %H:%M")
+        dt = dt.replace(tzinfo=SHANGHAI_TZ)
+        return dt.isoformat(timespec="seconds")
+    except ValueError:
+        return None
+
+
+def handle_daily_on(context: CommandContext) -> str:
+    """Enable daily problem for the current group."""
+    group_error = _require_group_context_for_daily(context)
+    if group_error:
+        return group_error
+
+    permission_error = _require_admin(context.user_id)
+    if permission_error:
+        return permission_error
+
+    daily_problem_store.enable_group(str(context.group_id))
+    _record_admin_log(
+        context.user_id,
+        "daily_problem_on",
+        f"group_id={context.group_id}",
+    )
+    return "已开启本群每日一题。"
+
+
+def handle_daily_off(context: CommandContext) -> str:
+    """Disable daily problem for the current group."""
+    group_error = _require_group_context_for_daily(context)
+    if group_error:
+        return group_error
+
+    permission_error = _require_admin(context.user_id)
+    if permission_error:
+        return permission_error
+
+    daily_problem_store.disable_group(str(context.group_id))
+    _record_admin_log(
+        context.user_id,
+        "daily_problem_off",
+        f"group_id={context.group_id}",
+    )
+    return "已关闭本群每日一题。"
+
+
+def handle_daily_status(context: CommandContext) -> str:
+    """Show daily problem status for the current group."""
+    group_error = _require_group_context_for_daily(context)
+    if group_error:
+        return group_error
+
+    permission_error = _require_admin(context.user_id)
+    if permission_error:
+        return permission_error
+
+    config = daily_problem_store.get_group(str(context.group_id))
+    _record_admin_log(
+        context.user_id,
+        "daily_problem_status",
+        f"group_id={context.group_id}; enabled={int(bool(config and config.get('enabled')))}",
+    )
+    if not config or not int(config.get("enabled", 0)):
+        return "每日一题状态：\n当前群：未开启"
+
+    pending_count = len(daily_problem_store.get_pending_problems(str(context.group_id)))
+    return f"每日一题状态：\n当前群：已开启\n待发布题目数：{pending_count}"
+
+
+def handle_daily_add(lines: list[str], context: CommandContext) -> str:
+    """Handle /daily add command."""
+    permission_error = _require_admin(context.user_id)
+    if permission_error:
+        return permission_error
+
+    if len(lines) < 4:
+        return DAILY_ADD_USAGE_TEXT
+
+    title = lines[1].strip()
+    link = lines[2].strip()
+    time_text = lines[3].strip()
+
+    if not title or not link or not time_text:
+        return "添加失败：所有字段不能为空。\n\n" + DAILY_ADD_USAGE_TEXT
+
+    publish_time = _parse_publish_time(time_text)
+    if not publish_time:
+        return "添加失败：时间格式错误，请使用 YYYY-MM-DD HH:MM 格式。\n\n" + DAILY_ADD_USAGE_TEXT
+
+    try:
+        problem = daily_problem_store.add_problem(
+            title=title,
+            link=link,
+            publish_time=publish_time,
+            created_by=str(context.user_id),
+        )
+    except sqlite3.Error:
+        logger.exception("failed to add daily problem")
+        return "添加失败：数据库错误，请稍后重试。"
+
+    _record_admin_log(
+        context.user_id,
+        "daily_problem_add",
+        f"problem_id={problem.get('id')}; title={title}",
+    )
+
+    return "\n".join(
+        [
+            "添加成功：",
+            f"ID：{problem.get('id')}",
+            f"标题：{title}",
+            f"链接：{link}",
+            f"发布时间：{time_text}",
+        ]
+    )
+
+
+def handle_daily_list(context: CommandContext) -> str:
+    """List pending daily problems."""
+    permission_error = _require_admin(context.user_id)
+    if permission_error:
+        return permission_error
+
+    try:
+        problems = daily_problem_store.get_pending_problems()
+    except sqlite3.Error:
+        logger.exception("failed to query daily problems")
+        return "查询失败：数据库错误，请稍后重试。"
+
+    if not problems:
+        return "暂无待发布的每日一题。"
+
+    lines = ["待发布题目列表：", ""]
+    for problem in problems:
+        publish_time = problem.get("publish_time", "")
+        if publish_time:
+            try:
+                dt = datetime.fromisoformat(publish_time)
+                time_str = dt.strftime("%Y-%m-%d %H:%M")
+            except ValueError:
+                time_str = publish_time
+        else:
+            time_str = "未设置"
+
+        lines.extend(
+            [
+                f"ID: {problem['id']}",
+                f"标题：{problem['title']}",
+                f"链接：{problem['link']}",
+                f"发布时间：{time_str}",
+                "",
+            ]
+        )
+    return "\n".join(lines)
+
+
+def handle_daily_edit(lines: list[str], context: CommandContext) -> str:
+    """Handle /daily edit command."""
+    permission_error = _require_admin(context.user_id)
+    if permission_error:
+        return permission_error
+
+    if len(lines) < 2:
+        return DAILY_EDIT_USAGE_TEXT
+
+    first_line = lines[0]
+    parts = first_line.split(maxsplit=2)
+    if len(parts) < 3:
+        return DAILY_EDIT_USAGE_TEXT
+
+    try:
+        problem_id = int(parts[2].strip())
+    except ValueError:
+        return "编辑失败：ID 必须是数字。\n\n" + DAILY_EDIT_USAGE_TEXT
+
+    problem = daily_problem_store.get_problem(problem_id)
+    if not problem:
+        return f"编辑失败：未找到 ID 为 {problem_id} 的题目。"
+
+    updates = {}
+    if len(lines) >= 2 and lines[1].strip():
+        updates["title"] = lines[1].strip()
+    if len(lines) >= 3 and lines[2].strip():
+        updates["link"] = lines[2].strip()
+    if len(lines) >= 4 and lines[3].strip():
+        publish_time = _parse_publish_time(lines[3].strip())
+        if not publish_time:
+            return "编辑失败：时间格式错误，请使用 YYYY-MM-DD HH:MM 格式。"
+        updates["publish_time"] = publish_time
+
+    if not updates:
+        return "未检测到需要修改的内容。"
+
+    try:
+        updated_problem = daily_problem_store.update_problem(problem_id, **updates)
+    except sqlite3.Error:
+        logger.exception("failed to update daily problem")
+        return "编辑失败：数据库错误，请稍后重试。"
+
+    _record_admin_log(
+        context.user_id,
+        "daily_problem_edit",
+        f"group_id={context.group_id}; problem_id={problem_id}",
+    )
+
+    return "\n".join(
+        [
+            f"编辑成功：ID {problem_id}",
+            f"标题：{updated_problem.get('title')}",
+            f"链接：{updated_problem.get('link')}",
+            f"发布时间：{updated_problem.get('publish_time')}",
+        ]
+    )
+
+
+def handle_daily_delete(problem_id_text: str, context: CommandContext) -> str:
+    """Handle /daily delete command."""
+    permission_error = _require_admin(context.user_id)
+    if permission_error:
+        return permission_error
+
+    try:
+        problem_id = int(problem_id_text.strip())
+    except ValueError:
+        return "删除失败：ID 必须是数字。"
+
+    problem = daily_problem_store.get_problem(problem_id)
+    if not problem:
+        return f"删除失败：未找到 ID 为 {problem_id} 的题目。"
+
+    try:
+        daily_problem_store.delete_problem(problem_id)
+    except sqlite3.Error:
+        logger.exception("failed to delete daily problem")
+        return "删除失败：数据库错误，请稍后重试。"
+
+    _record_admin_log(
+        context.user_id,
+        "daily_problem_delete",
+        f"problem_id={problem_id}",
+    )
+
+    return f"已删除题目：ID {problem_id} - {problem.get('title')}"
+
+
+def handle_daily_command(message: str, context: CommandContext) -> str:
+    """Dispatch /daily subcommands."""
+    lines = [line.strip() for line in message.splitlines() if line.strip()]
+    if not lines:
+        return DAILY_HELP_TEXT
+
+    first_line = lines[0]
+    parts = first_line.split(maxsplit=2)
+    if len(parts) == 1:
+        return DAILY_HELP_TEXT
+
+    subcommand = parts[1].strip().lower()
+    if subcommand == "on":
+        return handle_daily_on(context)
+    if subcommand == "off":
+        return handle_daily_off(context)
+    if subcommand == "status":
+        return handle_daily_status(context)
+    if subcommand == "add":
+        return handle_daily_add(lines, context)
+    if subcommand == "list":
+        return handle_daily_list(context)
+    if subcommand == "edit":
+        return handle_daily_edit(lines, context)
+    if subcommand == "delete" and len(parts) >= 3:
+        return handle_daily_delete(parts[2].strip(), context)
+    if subcommand == "help":
+        return DAILY_HELP_TEXT
+
+    return DAILY_HELP_TEXT
+
+
 async def dispatch_command(
     message: str,
     user_id: str | None = None,
@@ -1161,6 +1553,9 @@ async def dispatch_command(
         return handle_ping()
     if command == "/help":
         return handle_help(user_id)
+    if command.startswith("/help "):
+        topic = command.removeprefix("/help ").strip().lower()
+        return handle_help(user_id, topic)
     if command == "/about":
         return handle_about()
     if command == "/cf":
@@ -1174,5 +1569,7 @@ async def dispatch_command(
         return handle_admin_log(user_id)
     if command == "/qrating" or command.startswith("/qrating "):
         return handle_qrating_command(command, user_id)
+    if command == "/daily" or command.startswith("/daily "):
+        return handle_daily_command(command, context)
 
     return None
